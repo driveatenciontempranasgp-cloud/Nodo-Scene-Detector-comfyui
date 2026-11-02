@@ -90,7 +90,7 @@ def _detectar(ruta, detector, umbral, min_frames):
         sm.add_detector(AdaptiveDetector(adaptive_threshold=umbral, min_scene_len=min_frames))
     else:
         sm.add_detector(ContentDetector(threshold=umbral, min_scene_len=min_frames))
-    sm.detect_scenes(video=v, show_progress=False)
+    sm.detect_scenes(video=v, show_progress=False)  # va frame por frame, no guarda el video en memoria
     cortes = [(c.frame_num, c.get_seconds()) for c in sm.get_cut_list()]
     total = int(v.frame_number)
     fps = float(v.frame_rate)
@@ -98,7 +98,6 @@ def _detectar(ruta, detector, umbral, min_frames):
 
 
 class DetectarTomas:
-    """Nodo original. Entrega las primeras 4 tomas. No se modifica."""
     CATEGORY = "MiniMax H3/Tomas"
     FUNCTION = "detectar"
     OUTPUT_NODE = False
@@ -111,17 +110,19 @@ class DetectarTomas:
         return {
             "required": {
                 "video": ("VIDEO", {"tooltip": "Conéctalo a la salida VIDEO del Load Video del swap."}),
-                "detector": (["content", "adaptive"], {"default": "adaptive",
-                             "tooltip": "content = cambio de color/brillo entre frames. adaptive = compara contra el promedio de los frames vecinos."}),
-                "umbral": ("FLOAT", {"default": UMBRAL_ADAPTIVE, "min": 0.1, "max": 100.0, "step": 0.1,
-                           "tooltip": "Sensibilidad. adaptive: 3.0. content: 27."}),
+                "detector": (["content", "adaptive"], {"default": "content",
+                             "tooltip": "content = cambio de color/brillo entre frames (recomendado). adaptive = compara contra el promedio de los frames vecinos; aguanta mejor movimientos rápidos de cámara."}),
+                "umbral": ("FLOAT", {"default": UMBRAL_CONTENT, "min": 0.1, "max": 100.0, "step": 0.1,
+                           "tooltip": "Sensibilidad. content: 27 (más bajo = más cortes; con 'delr' funciona de 12 a 55). adaptive: 3.0 (funciona de 1 a 8). Si eliges adaptive y dejas 27, se usa 3.0 solo."}),
                 "min_frames_toma": ("INT", {"default": 5, "min": 1, "max": 10000, "step": 1,
                                     "tooltip": "Largo mínimo de una toma en frames. Ref2VA necesita al menos 5."}),
             }
         }
 
     @classmethod
-    def IS_CHANGED(cls, video=None, detector="adaptive", umbral=UMBRAL_ADAPTIVE, min_frames_toma=5, **kwargs):
+    def IS_CHANGED(cls, video=None, detector="content", umbral=UMBRAL_CONTENT, min_frames_toma=5, **kwargs):
+        # ComfyUI solo pasa aquí los widgets (el VIDEO viene por cable); el cambio de
+        # archivo ya lo detecta el Load Video de arriba. Si llega el video, se usa también.
         h = hashlib.sha256(f"{detector}|{umbral}|{min_frames_toma}".encode())
         try:
             if video is not None:
@@ -136,7 +137,7 @@ class DetectarTomas:
             pass
         return h.hexdigest()
 
-    def detectar(self, video, detector="adaptive", umbral=UMBRAL_ADAPTIVE, min_frames_toma=5):
+    def detectar(self, video, detector="content", umbral=UMBRAL_CONTENT, min_frames_toma=5):
         avisos = []
         if detector == "adaptive" and abs(umbral - UMBRAL_CONTENT) < 1e-6:
             umbral = UMBRAL_ADAPTIVE
@@ -152,6 +153,8 @@ class DetectarTomas:
                 except OSError:
                     pass
 
+        # Frame exacto de cada corte: se busca su tiempo en la lista real de frames
+        # (no depende de que el fps del archivo sea exacto).
         if pts and len(pts) == total_sd:
             t0 = pts[0]
             rel = [p - t0 for p in pts]
@@ -170,6 +173,7 @@ class DetectarTomas:
                 avisos.append(f"Conteo de frames distinto (PyAV {len(pts)} vs SceneDetect {total_sd}); usé los números de SceneDetect.")
         total = total_sd
 
+        # Recorte activo en el VIDEO (si lo hay): se re-numeran los frames dentro de la ventana.
         try:
             ini_t, dur_t = video.get_active_trim_window()
         except Exception:
@@ -197,7 +201,7 @@ class DetectarTomas:
             avisos.append(f"Se detectaron {len(tomas)} tomas; el workflow solo tiene {N_TOMAS}. Solo salen las primeras {N_TOMAS}.")
         cortas = [k for k, (a, b) in enumerate(tomas, 1) if (b - a) < max(5, int(min_frames_toma))]
         if cortas:
-            avisos.append("Toma(s) de menos de " + str(max(5, int(min_frames_toma))) + " frames: " + ", ".join(map(str, cortas)) + ".")
+            avisos.append("Toma(s) de menos de " + str(max(5, int(min_frames_toma))) + " frames: " + ", ".join(map(str, cortas)) + ". Revísalas o apágalas.")
         if avisos:
             lineas.append("AVISOS:")
             lineas += ["- " + a for a in avisos]
